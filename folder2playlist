@@ -1,0 +1,736 @@
+#!/usr/bin/env python3
+"""
+A script to find music files in a given directory, filter them by
+MIME type and duration, and then create an M3U playlist.
+Optionally, it can also copy the found music files to a specified directory.
+"""
+
+# TAGS: osu, music
+# todo: post-process with https://github.com/beetbox/beets
+
+__author__ = "John Doe"
+__version__ = "0.6.0" # Updated version for correct default playlist naming with copy
+__license__ = "MIT"
+
+import argparse
+import os
+import mutagen
+import magic
+import subprocess
+import sys
+import shutil
+from dataclasses import dataclass # Import dataclass
+from concurrent.futures import ThreadPoolExecutor, as_completed # For multithreading
+
+
+# Initialize python-magic for MIME type checking
+# Needs https://archlinux.org/packages/extra/any/python-magic/
+mime = magic.Magic(mime=True)
+
+
+### UTILS & CONSTANTS
+
+_global_verbosity_level = 1
+
+# ex: {'genre': ['Rock'], 'composer': ['ram seeni'], 'albumartist': ['ZUTOMAYO'], 'tracknumber': ['1'], 'album': ['Imawa Imade Chikaiwa Emide'], 'title': ['Kan Saete Kuyashiiwa'], 'artist': ['ZUTOMAYO'], 'label': ['UNIVERSAL MUSIC LLC'], 'date': ['2019', '2019-06-12'], 'artists': ['ZUTOMAYO']}
+# Global array for allowed ID3 fields in naming format
+from datetime import datetime
+
+ALLOWED_FIELDS = ["track", "title", "album", "artist", "year", "genre", "composer", "label", "date", "artists"]
+
+
+# AI suggested date normalization
+def _normalize_date(date_info) -> str:
+    """
+    Helper function to normalize various date formats into a consistent YYYY-MM-DD,
+    YYYY-MM, or YYYY string.
+    """
+    if not date_info:
+        return ''
+
+    # Case 1: Mutagen's Date objects from TDRC/TDRL/TDTG frames
+    if hasattr(date_info, 'text') and date_info.text:
+        for date_obj in date_info.text:
+            if hasattr(date_obj, 'year'):
+                try:
+                    year_val = date_obj.year if date_obj.year else 1900 # Default to 1900 if year is 0 or None
+                    
+                    if hasattr(date_obj, 'month') and date_obj.month:
+                        month_val = date_obj.month
+                        if hasattr(date_obj, 'day') and date_obj.day:
+                            day_val = date_obj.day
+                            # Attempt to create a datetime object for full date normalization
+                            try:
+                                full_date = datetime(year_val, month_val, day_val)
+                                return full_date.strftime("%Y-%m-%d")
+                            except ValueError:
+                                # Fallback if day is invalid for month (e.g., Feb 30)
+                                return f"{year_val:04d}-{month_val:02d}"
+                        else:
+                            return f"{year_val:04d}-{month_val:02d}"
+                    else:
+                        return str(year_val)
+                except (ValueError, TypeError):
+                    # Fallback if datetime conversion fails for any reason
+                    if date_obj.year:
+                        return str(date_obj.year)
+
+    # Case 2: String dates (from TYER, TDAT, or other text-based tags)
+    if isinstance(date_info, list) and date_info:
+        date_str = str(date_info[0]).strip()
+        if date_str:
+            # Attempt to parse common date formats
+            common_formats = [
+                "%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y", "%d/%m/%Y", # Full dates
+                "%Y-%m", "%Y/%m", # Year-month
+                "%Y" # Year only
+            ]
+            
+            for fmt in common_formats:
+                try:
+                    dt = datetime.strptime(date_str, fmt)
+                    # Return in normalized format
+                    if fmt in ["%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y", "%d/%m/%Y"]:
+                        return dt.strftime("%Y-%m-%d")
+                    elif fmt in ["%Y-%m", "%Y/%m"]:
+                        return dt.strftime("%Y-%m")
+                    else: # Must be just year
+                        return dt.strftime("%Y")
+                except ValueError:
+                    pass
+            
+            # Special handling for ID3v2.3 TDAT (DDMM)
+            if len(date_str) == 4 and date_str.isdigit():
+                try:
+                    # Assuming current year if only DDMM is provided
+                    current_year = datetime.now().year 
+                    dt = datetime.strptime(f"{date_str}{current_year}", "%d%m%Y")
+                    return dt.strftime("%Y-%m-%d")
+                except ValueError:
+                    pass
+
+            # Fallback for unparseable but present date string
+            return date_str
+
+    return ''
+
+def Mutagen_get_tag_value(mutagen_file, field_name: str):
+    """
+    Helper function to retrieve a specific tag value from a mutagen audio file,
+    checking for various common tag names and normalizing dates.
+    """
+    field_name_lower = field_name.lower()
+
+    # Define common tag mappings
+    tag_mappings = {
+        "title":    ['TIT2', 'title'],
+        "artist":   ['TPE1', 'artist'],
+        "artists":  ['TPE1', 'artists', 'TPE2'], # TPE2 is Album Artist
+        "album":    ['TALB', 'album'],
+        "track":    ['TRCK', 'tracknumber'],
+        "tracknumber": ['tracknumber'],
+        "year":     ['TDRC', 'TYER', 'year'], # TDRC for ID3v2.4 (recording date), TYER for older ID3v2.3
+        "date":     ['TDRC', 'TYER', 'TDAT', 'TDRL', 'TDTG', 'date', 'originaldate'], # TDAT (ID3v2.3 date DDMM), TDRL (Release Time), TDTG (Tagging Time)
+        "genre":    ['TCON', 'genre'],
+        "composer": ['TCOM', 'composer'],
+        "label":    ['TPUB', 'label'],
+    }
+
+    # Iterate through potential tag names for the requested field
+    for tag_name in tag_mappings.get(field_name_lower, [field_name_lower]):
+        # Handle specific cases first
+        if field_name_lower == "track":
+            track_info = mutagen_file.get(tag_name)
+            if track_info:
+                if hasattr(track_info, 'text') and track_info.text:
+                    track_str = str(track_info.text[0])
+                elif isinstance(track_info, list) and track_info:
+                    track_str = str(track_info[0])
+                else:
+                    track_str = ''
+
+                if track_str:
+                    return track_str.split('/')[0] # Handles "1/10"
+            continue
+
+        elif field_name_lower in ["year", "date"]:
+            date_info = mutagen_file.get(tag_name)
+            if date_info:
+                normalized_date = _normalize_date(date_info)
+                if normalized_date:
+                    return normalized_date
+            continue 
+            
+        else: # For all other fields
+            tag_value_list = mutagen_file.get(tag_name)
+            if tag_value_list:
+                if hasattr(tag_value_list, 'text') and tag_value_list.text:
+                    return str(tag_value_list.text[0])
+                elif isinstance(tag_value_list, list) and tag_value_list:
+                    return str(tag_value_list[0])
+    return ''
+
+def print_fields(obj):
+    for attr_name in dir(obj):
+        if not attr_name.startswith('__'):
+            try:
+                attr_value = getattr(obj, attr_name)
+                log_message(f"  {attr_name}: {attr_value}", level="debug")
+            except AttributeError:
+                pass
+
+def log_message(message, *msgs, level="info"):
+    """
+    Prints a log message to stderr with a specified level,
+    controlled by the global verbosity level.
+    """
+    global _global_verbosity_level # Access the global variable
+
+    if level == "error":
+        print(f"ERROR: {message}", *msgs, file=sys.stderr)
+    elif level == "warning":
+        if _global_verbosity_level >= 1:
+            print(f"WARNING: {message}", *msgs, file=sys.stderr)
+    elif level == "info":
+        if _global_verbosity_level >= 2:
+            print(f"INFO: {message}", *msgs, file=sys.stderr)
+    elif level == "debug":
+        if _global_verbosity_level >= 3:
+            print(f"DEBUG: {message}", *msgs, file=sys.stderr)
+
+
+@dataclass
+class GlobalConfig:
+    """
+    A class to hold global configuration settings derived from command-line arguments.
+    """
+    min_duration: int
+    fix_names_format: str | None # Use Python 3.10+ union type hint
+    # verbosity: int = 1  # Default verbosity
+    default_ext: str = ".mp3" # Default extension
+    multithread: bool = False # Multithreading flag
+
+
+### MUTAGEN
+
+class Music:
+    """
+    Represents a music file with its directory, name, extension, and mutagen audio object.
+    """
+    def __init__(self, full_path, config: GlobalConfig): # Type hint for config
+        self.dir = os.path.dirname(full_path)
+        self.name = os.path.basename(full_path)
+        self.path = full_path
+        self.audio = None
+        self._ext = "" # To store detected extension if original has none
+        self.config = config # Store the config object
+        self._suffix = None
+        self._improved_root = None
+
+        try:
+            self.audio = mutagen.File(self.path)
+            if self.audio:
+                if not os.path.splitext(self.name)[1]:
+                    self._ext = self._detect_audio_extension() or ""
+                log_message(f"Parsed {self.path}", level="debug")
+            else:
+                log_message(f"Could not parse audio info for {self.path} with mutagen.", level="debug")
+        except Exception as e:
+            log_message(f"Error loading {self.path} with mutagen: {e}", level="error")
+        
+        self.duration = self.get_duration()
+
+    @property
+    def improved_name(self, cached=True):
+        """
+        Returns the filename with the corrected/detected extension, applying a naming format if specified.
+        """
+        if self._improved_root == None or not cached:
+            name_without_ext=""
+            if self.config.fix_names_format and self.audio:
+                formatted_name = self.config.fix_names_format
+
+                for field in ALLOWED_FIELDS:
+                    placeholder = "{" + field + "}"
+                    value = Mutagen_get_tag_value(self.audio, field) # Get value from tag_map, default to empty
+                    formatted_name = formatted_name.replace(placeholder, value)
+
+                # Sanitize the filename to remove invalid characters
+                name_without_ext = "".join(c for c in formatted_name if c.isalnum() or c in (' ', '-', '_', '.'))
+            
+            if name_without_ext == "":
+                name_without_ext, _ = os.path.splitext(self.name)
+            
+            self._improved_root = name_without_ext
+
+        return self._improved_root + self.suffix + self.ext
+
+    @property
+    def suffix(self):
+        if self._suffix:
+            return f"_({self._suffix})"
+        return ""
+
+    @property
+    def ext(self):
+        """
+        Returns the extension of the music file.
+        Prioritizes the _ext attribute if set, falls back to path detection.
+        """
+        if self._ext:
+            return self._ext
+        _, ext = os.path.splitext(self.name)
+        return ext or self.config.default_ext
+
+    def _detect_audio_extension(self, method=""):
+        """
+        Detects the proper extension for an audio file using its mutagen audio object.
+        Returns the inferred extension (e.g., ".mp3", ".ogg", ".flac", ".m4a", ".wav") or None.
+        Prioritizes common audio MIME types.
+        """
+        if self.audio:
+            if isinstance(self.audio, mutagen.mp3.MP3):
+                return ".mp3"
+            elif isinstance(self.audio, mutagen.oggvorbis.OggVorbis):
+                return ".ogg"
+            elif isinstance(self.audio, mutagen.flac.FLAC):
+                return ".flac"
+            elif isinstance(self.audio, mutagen.wavpack.WavPack) or isinstance(self.audio, mutagen.wave.WAVE):
+                return ".wav"
+            elif isinstance(self.audio, mutagen.aiff.AIFF):
+                return ".aiff"
+            elif isinstance(self.audio, mutagen.dsf.DSF):
+                return ".dsf"
+            elif isinstance(self.audio, mutagen.aac.AAC):
+                if hasattr(self.audio, 'mime_type') and self.audio.mime_type:
+                    mime_type = self.audio.mime_type.lower()
+                    if mime_type in ("audio/mp4", "audio/x-m4a"):
+                        return ".m4a"
+                    elif mime_type == "audio/aac":
+                        return ".aac"
+                return ".aac"
+            
+            if hasattr(self.audio, 'mime') and self.audio.mime:
+                mime_type = self.audio.mime[0].lower()
+                if mime_type.startswith("audio/"):
+                    return "." + mime_type.split('/')[-1]
+        
+        log_message(f"Could not detect extension for {self.path}", level="info")
+        return None
+
+    def get_duration(self, use_ffmpeg=True):
+        """
+        Retrieves the duration of the music file.
+        Uses mutagen first, falls back to ffmpeg if mutagen fails or is not available.
+        """
+        if self.audio and hasattr(self.audio.info, 'length'):
+            return self.audio.info.length
+        
+        if use_ffmpeg:
+            return self._get_duration_with_ffmpeg()
+        
+        return None
+
+    def _get_duration_with_ffmpeg(self):
+            """
+            Helper method: Retrieves the duration of the audio file using ffprobe.
+            """
+            try:
+                # Uses ffprobe instead of ffmpeg
+                result = subprocess.run(
+                    [
+                        "ffprobe",
+                        "-v", "error",
+                        "-show_entries", "format=duration",
+                        "-of", "default=noprint_wrappers=1:nokey=1",
+                        self.path
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=True
+                )
+                
+                duration_str = result.stdout.strip()
+                if duration_str:
+                    return float(duration_str)
+                return None
+
+            except subprocess.CalledProcessError as e:
+                log_message(f"Error running ffprobe for {self.path}: {e.stderr}", level="error")
+                return None
+            except ValueError: # Catches errors if duration_str is not a valid float
+                log_message(f"Could not parse duration from ffprobe output for {self.path}: {duration_str}", level="error")
+                return None
+            except Exception as e:
+                log_message(f"An unexpected error occurred for {self.path}: {e}", level="error")
+                return None
+
+    def __repr__(self):
+        return f"Music(path='{self.path}')"
+
+
+
+def mime_check(file_path):
+    """
+    Checks if a file is an audio file and its size is greater than 1MB.
+    """
+    try:
+        mimetype = mime.from_file(file_path)
+        return (
+            mimetype
+            and mimetype.startswith("audio/")
+            and os.path.getsize(file_path) > 1e6 # 1MB in bytes
+        )
+    except Exception as e:
+        log_message(f"Could not determine MIME type for {file_path}: {e}", level="warning")
+        return False
+
+def process_file(file_path, config: GlobalConfig):
+    """
+    Helper function to process a single file for multithreading.
+    Returns a Music object if criteria are met, otherwise None.
+    """
+    if mime_check(file_path):
+        music_obj = Music(file_path, config)
+        if music_obj.duration is not None and music_obj.duration >= config.min_duration:
+            return music_obj
+        else:
+            log_message(f"Skipping '{os.path.basename(file_path)}' due to too short duration", level="info")
+    return None
+
+def find_music_files(folder_path: str, config: GlobalConfig): # Type hints added
+    """
+    Recursively finds music files in a folder that meet MIME type and duration criteria.
+    Returns a list of Music objects.
+    Uses multithreading if enabled in config.
+    """
+    music_files = []
+    if not os.path.isdir(folder_path):
+        log_message(f"Folder '{folder_path}' does not exist or is not a directory.", level="error")
+        return []
+
+    log_message(f"Searching for music files in '{folder_path}'...", level="info")
+
+    all_files = []
+    for root, _, files in os.walk(folder_path):
+        for file_name in files:
+            all_files.append(os.path.join(root, file_name))
+    
+    if config.multithread:
+        log_message(f"Using multithreading to process {len(all_files)} files.", level="info")
+        with ThreadPoolExecutor() as executor:
+            # Submit tasks to the thread pool
+            future_to_file = {executor.submit(process_file, file_path, config): file_path for file_path in all_files}
+            for future in as_completed(future_to_file):
+                result = future.result()
+                if result:
+                    music_files.append(result)
+    else:
+        log_message(f"Using single-threaded processing for {len(all_files)} files.", level="info")
+        for file_path in all_files:
+            result = process_file(file_path, config)
+            if result:
+                music_files.append(result)
+
+    return music_files
+
+def create_m3u_playlist(music_files, output, copy_dest=None, input_folder=None):
+    """
+    Creates an M3U playlist file from a list of Music objects.
+    If music files are copied, the playlist entries will reflect the new paths.
+    """
+    try:
+        if copy_dest:
+            # If copying, the playlist path is relative to the copy destination or absolute
+            playlist_base_path = os.path.abspath(copy_dest)
+        else:
+            # If not copying, the playlist path is relative to the current working directory or absolute
+            playlist_base_path = os.path.abspath(os.path.dirname(output))
+
+
+        rel = False
+        # Check if the output playlist path is within the target directory for relative paths
+        if copy_dest and os.path.abspath(output).startswith(playlist_base_path):
+            rel = True
+        elif not copy_dest and input_folder and os.path.abspath(output).startswith(os.path.abspath(input_folder)):
+             # If not copying, and the playlist output is within the input folder
+            rel = True
+        
+        with open(output, 'w') as m3u_file:
+            m3u_file.write('#EXTM3U\n')
+            for music_obj in music_files:
+                if copy_dest:
+                    # Construct the path in the destination folder, using improved_name
+                    file_to_add = os.path.join(copy_dest, music_obj.improved_name)
+                else:
+                    file_to_add = music_obj.path
+                    
+                if rel:
+                    entry = os.path.relpath(file_to_add, os.path.dirname(output))
+                else:
+                    entry = file_to_add
+
+                m3u_file.write(entry + '\n')
+        log_message(f"Successfully created playlist at: {output}", level="info")
+    except IOError as e:
+        log_message(f"Could not write playlist to {output}: {e}", level="error")
+        sys.exit(1)
+
+def resolve_music_filenames(music_files):
+    """
+    Preprocesses a list of Music objects to handle potential filename conflicts
+    arising from duplicate 'improved_name' values.
+
+        Returns:
+        list[Music]: The same list of Music objects that was passed in,
+                     with the 'improved_name' attributes potentially modified
+                     for files identified as conflicting duplicates.
+    """
+    name_groups = {}
+    for music_obj in music_files:
+        if music_obj.improved_name not in name_groups:
+            name_groups[music_obj.improved_name] = []
+        name_groups[music_obj.improved_name].append(music_obj)
+
+    final_music = []
+
+    for improved_name_key, group in name_groups.items():
+        if len(group) > 1:
+            log_message(
+                f"Found {len(group)} files with the same improved_name: "
+                f"'{improved_name_key}'. Checking durations for potential renaming...",
+                level="debug"
+            )
+            new_group = [group[0]]
+            suffix = 1
+
+            for current_obj in group[1:]:
+                add = True
+                for obj in new_group:
+                    if abs(current_obj.duration - obj.duration) < 1.0:
+                        log_message(
+                            f"Skipping '{improved_name_key}': '{current_obj.path}' as duration difference "
+                            f"with '{obj.path}' of the same name is within tolerance (<=1s).",
+                            level="info"
+                        )
+                        add = False
+                        break
+                if add:
+                    current_obj._suffix=suffix
+                    new_group.append(current_obj)
+                    suffix+=1
+            
+            final_music.extend(new_group)
+        else:
+            final_music.extend(group)
+
+    return final_music # Return the list with potentially modified improved_name attributes.
+
+def copy_music_files(music_files, destination_folder):
+    """
+    Copies a list of Music objects to a specified destination folder.
+    Skips existing files and logs the action.
+    """
+    if not os.path.exists(destination_folder):
+        try:
+            os.makedirs(destination_folder)
+            log_message(f"Created destination folder: {destination_folder}", level="info")
+        except OSError as e:
+            log_message(f"Could not create destination folder '{destination_folder}': {e}", level="error")
+            return False
+
+    log_message(f"Attempting to copy {len(music_files)} music files to '{destination_folder}'...", level="info")
+    copied_count = 0
+    skipped_count = 0
+    for music_obj in music_files:
+        dest_file_name = music_obj.improved_name
+        dest_file_path = os.path.join(destination_folder, dest_file_name)
+        if os.path.exists(dest_file_path):
+            log_message(f"Skipping existing file: '{dest_file_name}' in '{destination_folder}'", level="info")
+            skipped_count += 1
+            continue
+
+        try:
+            shutil.copy2(music_obj.path, dest_file_path)
+            copied_count += 1
+            log_message(f"Copied '{music_obj.name}' to '{dest_file_name}'", level="debug")
+        except Exception as e:
+            log_message(f"Could not copy '{music_obj.path}' to '{destination_folder}': {e}", level="warning")
+            
+    log_message(f"Finished copying. Successfully copied {copied_count} files, skipped {skipped_count} existing files.", level="info")
+    return True
+
+
+### MAIN
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Finds audio files, filters them by duration, and creates an M3U playlist.\n"
+                    "Optionally, copies the found music files to a specified directory.",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+
+    parser.add_argument(
+        "folder",
+        nargs="?",
+        help="The path to the folder to scan for music files.\n"
+             "If not provided, you will be prompted to enter it."
+    )
+
+    parser.add_argument(
+        "-o", "--output",
+        dest="output_playlist_path_arg",
+        help="The path and filename for the M3U playlist to be created.\n"
+             "If not provided, a default name will be used (see --copy for details)."
+    )
+
+    parser.add_argument(
+        "-m", "--min-duration",
+        dest="min_duration",
+        type=int,
+        default=20,
+        help="The minimum duration (in seconds) for audio files to be included in the playlist.\n"
+             "Defaults to 20 seconds."
+    )
+
+    parser.add_argument(
+        "-c", "--copy",
+        dest="copy_destination_folder_arg",
+        nargs="?",
+        const=True,
+        help="Enable copying of found music files to a specified directory.\n"
+             "Provide a path like '-c /path/to/copy/folder'.\n"
+             "If no path is provided (e.g., just '-c'), you will be prompted for it."
+    )
+
+    parser.add_argument(
+        "--fix-names",
+        dest="fix_names_format",
+        nargs="?", # Makes the argument optional, and if present without a value, const is used
+        const="{title}", # Default format if --fix-names is used without a value
+        help=f"Rename copied files based on a format string using ID3 tags.\n"
+             f"Accepted fields: {', '.join([f'{{{field}}}' for field in ALLOWED_FIELDS])}.\n"
+             f"If no format is provided, defaults to '{{title}}'.\n"
+             f"Example: '{{artist}} - {{title}} - {{album}}'"
+    )
+
+    parser.add_argument(
+        "-v", "--verbose",
+        action="count",
+        default=2,
+        help="Increase verbosity level.\n"
+             "  -v: WARNINGS\n"
+             "  -vv: INFO (Default)\n"
+             "  -vvv: DEBUG"
+    )
+    
+    parser.add_argument(
+        "--default-ext",
+        dest="default_ext",
+        default=".mp3",
+        help="Default extension to use if the audio file's extension cannot be determined.\n"
+             "Defaults to '.mp3'."
+    )
+
+    parser.add_argument(
+        "--multi", "--multithread",
+        dest="multithread",
+        action="store_true",
+        help="Enable multithreaded processing for finding music files. Can speed up scanning large directories."
+    )
+
+    parser.add_argument(
+        "--version",
+        action="version",
+        version="%(prog)s (version {version})".format(version=__version__),
+        help="Show program's version number and exit."
+    )
+
+    return parser.parse_args()
+
+
+def main():
+    """
+    Main function to parse arguments, find music files, optionally copy them,
+    and create the playlist.
+    """
+    global _global_verbosity_level # Allow setting the global verbosity
+
+    args = parse_args()
+
+    # Set the global verbosity level based on command-line argument
+    _global_verbosity_level = args.verbose
+    log_message("VERBOSITY: args.verbose", level="INFO")
+
+    config = GlobalConfig(
+        min_duration=args.min_duration,
+        fix_names_format=args.fix_names_format,
+        default_ext=args.default_ext,
+        multithread=args.multithread
+    )
+
+    # Determine the input folder path
+    input_folder_path = args.folder
+    if not input_folder_path:
+        input_folder_path = input("Enter the folder path to scan for music: ").strip()
+        if not input_folder_path:
+            log_message("No folder path provided. Exiting.", level="error")
+            sys.exit(1)
+    
+    input_folder_path = os.path.abspath(input_folder_path)
+
+    # Determine the copy destination folder
+    copy_destination_folder = None
+    if args.copy_destination_folder_arg:
+        if args.copy_destination_folder_arg is True:
+            copy_destination_folder = input("Enter the destination folder path for copying music: ").strip()
+            if not copy_destination_folder:
+                log_message("No copy destination folder provided. Exiting.", level="error")
+                sys.exit(1)
+        else:
+            copy_destination_folder = args.copy_destination_folder_arg
+    
+    if copy_destination_folder:
+        copy_destination_folder = os.path.abspath(copy_destination_folder)
+
+    # Determine the output playlist path
+    output_playlist_path = args.output_playlist_path_arg
+
+    if not output_playlist_path:
+        playlist_base_name = ""
+        if copy_destination_folder:
+            playlist_base_name = os.path.basename(copy_destination_folder)
+        else:
+            playlist_base_name = os.path.basename(input_folder_path)
+            
+        default_playlist_name = f"{playlist_base_name}.m3u"
+        
+        if copy_destination_folder:
+            output_playlist_path = os.path.join(copy_destination_folder, default_playlist_name)
+        else:
+            output_playlist_path = default_playlist_name 
+        
+        user_playlist_path = input(f"Enter the path for the m3u playlist (default: {output_playlist_path}): ").strip()
+        if user_playlist_path:
+            output_playlist_path = user_playlist_path
+
+    # Pass the config object instead of individual arguments
+    music_files = find_music_files(input_folder_path, config)
+    
+    if not music_files:
+        log_message(f"No music files found in '{input_folder_path}' meeting the criteria (min duration: {config.min_duration}s).", level="info")
+        sys.exit(0)
+
+    if copy_destination_folder:
+        music_files = resolve_music_filenames(music_files)
+        success = copy_music_files(music_files, copy_destination_folder)
+        if not success:
+            log_message("Copying failed for some files. Playlist might contain original paths if not all files copied.", level="warning")
+        
+    create_m3u_playlist(music_files, output_playlist_path, copy_dest=copy_destination_folder, input_folder=input_folder_path)
+
+    log_message(f"Processed {len(music_files)} music files.", level="info")
+
+if __name__ == "__main__":
+    main()
