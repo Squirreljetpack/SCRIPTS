@@ -1,0 +1,15 @@
+[project]
+name = "SCRIPTS"
+version = "0.1.0"
+description = "Generic scripts python interpreter"
+authors = [""]
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+[tasks]
+
+[dependencies]
+requests = ">=2.32.3,<2.33"
+mutagen = ">=1.47.0,<1.48"
+bs4 = ">=4.13.4,<4.14"
+python-magic = ">=0.4.27,<0.5"
