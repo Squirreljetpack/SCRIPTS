@@ -61,9 +61,7 @@ def parse_args():
         '-s', '--show',
         action='store_true',
         help='Optional: Display the output using "column -s, -t" on the console.\n'
-             'This option is effective whether --output is used or not. '
-             'If --output is NOT used, and --show IS used, output will be piped directly.\n'
-             'If neither --output nor --show is used, the script will exit after fetching data.'
+             'By default, True if --output is not supplied.'
     )
     parser.add_argument(
         '-v', '--verbose',
@@ -218,7 +216,8 @@ def main():
         except IOError as e:
             logger.error(f"Could not open output file '{args.output}': {e}")
             sys.exit(1)
-    elif args.show:
+    else:
+        args.show = True
         try:
             program = subprocess.Popen(['column', '-s,', '-t'],
                 stdin=subprocess.PIPE)
@@ -235,10 +234,7 @@ def main():
 
         output = EncodedStreamWrapper(program.stdin)
         logger.debug("Output will be piped to the 'column' command.")
-        
-    else:
-        logger.info("No output destination specified (--output or --show). Exiting.")
-        sys.exit(0)
+    
 
     csv_writer = csv.writer(output)
 
@@ -249,7 +245,7 @@ def main():
         if not day_forecasts:
             continue
 
-        csv_writer.writerow([''])
+        csv_writer.writerow(['']*len(header))
         csv_writer.writerow([f"({day_forecasts[0]['Date']})"]+['']*(len(header) - 1))
 
         for hourly_data in day_forecasts:
