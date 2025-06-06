@@ -1,0 +1,280 @@
+#!/usr/bin/env python3
+
+import json
+import requests
+import sys
+import csv
+import argparse
+import os
+import logging
+import subprocess
+
+### TYPES
+
+class EncodedStreamWrapper:
+    def __init__(self, binary_stream, encoding='utf-8'):
+        """
+        binary_stream: The underlying stream (e.g., program.stdin, io.BytesIO)
+                        that expects bytes.
+        encoding (str): The encoding to use (e.g., 'utf-8', 'latin-1').
+        """
+        for attr in ['write', 'flush', 'close']:
+            if not hasattr(binary_stream, attr):
+                raise TypeError(f"Stream must have a '{attr}' method.")
+            
+        self._stream = binary_stream
+        self._encoding = encoding
+
+    def write(self, s):
+        if isinstance(s, str):
+            self._stream.write(s.encode(self._encoding))
+        else:
+            logger.error("Unexpected stream encountered (not str).")
+            sys.exit(1)
+
+    def flush(self):
+        self._stream.flush()
+
+    def close(self):
+        self._stream.close()
+
+### BOILERPLATE
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description='Fetches weather forecast data and outputs it to a CSV file or console.',
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+    parser.add_argument(
+        'location',
+        type=str,
+        nargs='+',
+        help='The geographic location (e.g., "London", "New York City") for which to get the weather forecast.'
+    )
+    parser.add_argument(
+        '-o', '--output',
+        type=str,
+        help='Optional: Path to the output CSV file (e.g., "weather_report.csv").\n'
+             'If not provided, output will be directed to standard output (console).'
+    )
+    parser.add_argument(
+        '-s', '--show',
+        action='store_true',
+        help='Optional: Display the output using "column -s, -t" on the console.\n'
+             'This option is effective whether --output is used or not. '
+             'If --output is NOT used, and --show IS used, output will be piped directly.\n'
+             'If neither --output nor --show is used, the script will exit after fetching data.'
+    )
+    parser.add_argument(
+        '-v', '--verbose',
+        action='count',
+        default=0,
+        help='Optional: Enable verbose logging.\n'
+             '-v: INFO level\n'
+             '-vv: DEBUG level'
+    )
+
+    args = parser.parse_args()
+    return args
+
+def setup_logging(level):
+    global logger
+    logging.basicConfig(level=logging.ERROR, format='%(levelname)s: %(message)s')
+    logger = logging.getLogger(__name__)
+
+    if level == 1:
+        logger.setLevel(logging.WARNING)
+    if level == 2:
+        logger.setLevel(logging.INFO)
+        logger.info("Logging @ INFO")
+    elif level >= 3:
+        logger.setLevel(logging.DEBUG)
+        logger.debug("Logging @ DEBUG")
+    else:
+        logger.info("Default logging level (ERROR) enabled.")
+
+### HANDLERS
+
+def _openweather_get_volume(forecast_item, precipitation_type):
+    """
+    Retrieves the precipitation volume for a given type (rain or snow)
+    from a forecast item. Returns ' ' if the key is not found.
+    """
+    try:
+        return forecast_item[precipitation_type]['3h']
+    except KeyError:
+        return ' '
+
+def get_api_key(provider):
+    """
+    Retrieve the api key for a provider from the matching environment variable.
+    """
+    var_name=provider.upper() + "_API_KEY"
+    key = os.environ.get(var_name)
+    if not key:
+        logger.error(f"{var_name} environment variable not set.")
+        logger.error(f"Please set it (e.g., export {var_name}='your_api_key') and try again.")
+        sys.exit(1)
+    return key
+
+def openweather_handler(location):
+    """
+    Fetches weather data from the OpenWeatherMap API and processes it into
+    a 2D array representing daily forecasts.
+
+    Returns:
+        list[list[dict]]: A 2D array where each inner list is a day's forecast,
+                          and each dict contains parsed hourly data.
+    """
+
+    key=get_api_key("openweather")
+
+    url = f'https://api.openweathermap.org/data/2.5/forecast?q={location}&appid={key}&units=metric'
+
+    try:
+        logger.info(f"Fetching weather data for: {location.title()} from OpenWeatherMap...")
+        response = requests.get(url)
+        response.raise_for_status()
+        forecast_data = json.loads(response.text)
+        logger.info("Weather data fetched successfully.")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error fetching data from OpenWeatherMap API: {e}")
+        sys.exit(1)
+    except json.JSONDecodeError:
+        logger.error("Error: Could not decode JSON response from API.")
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"An unexpected error occurred: {e}")
+        sys.exit(1)
+
+    forecast_list = forecast_data['list']
+    forecast_days = []
+    current_idx = 0
+
+    if not forecast_list:
+        logger.error("No forecast data found in the API response.")
+        sys.exit(1)
+
+    last_date_str = forecast_list[0]['dt_txt'].split()[0]
+    current_day_forecasts = []
+
+    while current_idx < len(forecast_list):
+        item = forecast_list[current_idx]
+        current_date_str = item['dt_txt'].split()[0]
+        if current_date_str != last_date_str:
+            forecast_days.append(current_day_forecasts.copy())
+            current_day_forecasts = []
+
+        hourly_data = {
+            'Date': current_date_str,
+            'Hour': item['dt_txt'].split()[1],
+            'Condition': item['weather'][0]['description'],
+            'Min Temp (℃)': item['main']['temp_min'],
+            'Max Temp(℃)': item['main']['temp_max'],
+            'Humidity(%)': item['main']['humidity'],
+            'Wind(m/s)': item['wind']['speed'],
+            'Rain(mm)': _openweather_get_volume(item, 'rain'),
+            'Snow(mm)': _openweather_get_volume(item, 'snow')
+        }
+
+        current_day_forecasts.append(hourly_data)
+        current_idx += 1
+        last_date_str = current_date_str
+
+    # Append the last day's forecasts
+    if current_day_forecasts:
+        forecast_days.append(current_day_forecasts)
+
+    return forecast_days
+
+def get_forecast(location, provider="openweather"):
+    """
+    Retrieves the forecast list from the specified weather provider.
+    """
+    if provider == "openweather":
+        return openweather_handler(location)
+    else:
+        logger.error(f"Error: Unsupported weather provider '{provider}'.")
+        sys.exit(1)
+
+def main():
+    args = parse_args()
+    setup_logging(args.verbose)
+
+    location = ' '.join(args.location)
+    forecast = get_forecast(location, provider="openweather")
+
+    output = None
+
+    if args.output:
+        try:
+            output = open(args.output, 'w', newline='')
+            logger.debug(f"Output will be written to file: {args.output}")
+        except IOError as e:
+            logger.error(f"Could not open output file '{args.output}': {e}")
+            sys.exit(1)
+    elif args.show:
+        try:
+            program = subprocess.Popen(['column', '-s,', '-t'],
+                stdin=subprocess.PIPE)
+        except FileNotFoundError:
+            logger.error("Error: 'column' command not found. Please ensure it's installed and in your PATH.")
+            sys.exit(1) # Exit if 'column' command is not found
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Error running 'column' command ({e.returncode}):")
+            logger.error(f"{e.stderr.decode('utf-8')}")
+            sys.exit(1)
+        except Exception as e:
+            logger.error(f"An unexpected error occurred while piping to 'column': {e}")
+            sys.exit(1)
+
+        output = EncodedStreamWrapper(program.stdin)
+        logger.debug("Output will be piped to the 'column' command.")
+        
+    else:
+        logger.info("No output destination specified (--output or --show). Exiting.")
+        sys.exit(0)
+
+    csv_writer = csv.writer(output)
+
+    header = ['Hour', 'Condition', 'Min Temp (℃)', 'Max Temp(℃)', 'Humidity(%)', 'Wind(m/s)', 'Rain(mm)', 'Snow(mm)']
+    csv_writer.writerow(header)
+
+    for day_index, day_forecasts in enumerate(forecast):
+        if not day_forecasts:
+            continue
+
+        csv_writer.writerow([''])
+        csv_writer.writerow([f"({day_forecasts[0]['Date']})"]+['']*(len(header) - 1))
+
+        for hourly_data in day_forecasts:
+            row_values = [
+                hourly_data['Hour'],
+                hourly_data['Condition'],
+                hourly_data['Min Temp (℃)'],
+                hourly_data['Max Temp(℃)'],
+                hourly_data['Humidity(%)'],
+                hourly_data['Wind(m/s)'],
+                hourly_data['Rain(mm)'],
+                hourly_data['Snow(mm)']
+            ]
+            csv_writer.writerow(row_values)
+
+    if output is not None:
+        output.close()
+
+        if args.output:
+            logger.info(f"Saved to: {args.output}")
+    
+    if args.output and args.show:
+        try:
+            subprocess.run(['column', '-s,', '-t', args.output], check=True)
+        except FileNotFoundError:
+            logger.error("Error: 'column' command not found. Please ensure it's installed and in your PATH.")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Error running 'column' command: {e}")
+    
+
+
+if __name__ == "__main__":
+    main()

@@ -8,3 +8,7 @@ Walk a directory, checking the integrity of audio files and collecting valid one
   - With `--fix-names <template>`, `mutagen` is used to rename the new files according to metadata.
   - Ex: `./folder2playlist ~/.local/share/osu/files --copy ~/Music/ncmpcpp/osu/ --fix-names --multi` (Create a .m3u playlist from your Osu library).
   - Ex: `./folder2playlist` (Provide arguments interactively).
+
+### weather
+
+Get the weather from a provider (openweather), and write the forecast to a csv or display as a table in terminal.
