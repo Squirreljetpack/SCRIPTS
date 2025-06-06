@@ -93,17 +93,7 @@ def setup_logging(level):
     else:
         logger.info("Default logging level (ERROR) enabled.")
 
-### HANDLERS
-
-def _openweather_get_volume(forecast_item, precipitation_type):
-    """
-    Retrieves the precipitation volume for a given type (rain or snow)
-    from a forecast item. Returns ' ' if the key is not found.
-    """
-    try:
-        return forecast_item[precipitation_type]['3h']
-    except KeyError:
-        return ' '
+### LOGIC
 
 def get_api_key(provider):
     """
@@ -116,6 +106,29 @@ def get_api_key(provider):
         logger.error(f"Please set it (e.g., export {var_name}='your_api_key') and try again.")
         sys.exit(1)
     return key
+
+def get_forecast(location, provider="openweather"):
+    """
+    Retrieves the forecast list from the specified weather provider.
+    """
+    if provider == "openweather":
+        return openweather_handler(location)
+    else:
+        logger.error(f"Error: Unsupported weather provider '{provider}'.")
+        sys.exit(1)
+
+
+### HANDLERS
+
+def _openweather_get_volume(forecast_item, precipitation_type):
+    """
+    Retrieves the precipitation volume for a given type (rain or snow)
+    from a forecast item. Returns ' ' if the key is not found.
+    """
+    try:
+        return forecast_item[precipitation_type]['3h']
+    except KeyError:
+        return ' '
 
 def openweather_handler(location):
     """
@@ -187,15 +200,7 @@ def openweather_handler(location):
 
     return forecast_days
 
-def get_forecast(location, provider="openweather"):
-    """
-    Retrieves the forecast list from the specified weather provider.
-    """
-    if provider == "openweather":
-        return openweather_handler(location)
-    else:
-        logger.error(f"Error: Unsupported weather provider '{provider}'.")
-        sys.exit(1)
+### MAIN
 
 def main():
     args = parse_args()

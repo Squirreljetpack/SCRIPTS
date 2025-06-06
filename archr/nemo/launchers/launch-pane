@@ -1,0 +1,40 @@
+#!/bin/zsh
+
+# ctrl+caps+(/)
+
+args=($@)
+idx=${args[(Ie)--gtk]}
+if ((idx)); then
+  gtk=true
+  args[$idx]=
+fi
+set -- $args
+
+if $gtk; then
+  name=$1
+  class=Navigator.$name
+  cmd="gtk-launch $name"
+else
+  cmd=$1
+  class=$2
+  [[ $class == $class#*. ]] && class=Navigator.$class
+fi
+
+awk_name="Navigator.$name"
+
+win_id=$(wmctrl -lx | awk -v name=$class '$3 == name { print $1 }')
+
+echo $win_id
+if [[ -z $win_id ]]; then
+  pu.add $cmd
+else
+  active=$(xprop -root 32x '\t$0' _NET_ACTIVE_WINDOW | cut -f 2)
+  n_active=$(printf "0x%08x" $((active)))
+  echo $n_active
+  if [[ $n_active != $win_id ]]; then
+    curr_desktop=$(wmctrl -d | awk '/\*/ {print $1}')
+    wmctrl -iR $win_id
+  else
+    xdotool windowminimize $win_id
+  fi
+fi

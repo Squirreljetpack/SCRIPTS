@@ -1,0 +1,137 @@
+#!/bin/zsh
+key=5
+s=0
+lock=$ZSHSTATEdir/io/mwheel
+
+# todo: use pageup to increase scrolling speed
+
+cleanup() {
+  xdotool keyup Shift_L Shift_R Control_L Control_R Alt_L Alt_R Super_L Super_R
+  [[ -e $lock ]] && rm $lock*
+  pkill -9 -f mwheel
+}
+
+toggle() {
+  # todo: loop until mine is only remaining in
+  # for pid in $(pgrep -f mwheel); do
+  #   [ "$pid" != $$ ] && kill -9 "$pid"
+  # done
+  # then depending on lock.4 or lock.5 do the opposite
+}
+
+# Saved as an example of zenity gui haha
+gui() {
+
+  # Version 0.1 Tuesday, 07 May 2013
+  # Comments and complaints http://www.nicknorton.net
+  # GUI for mouse wheel speed using imwheel in Gnome
+  # imwheel needs to be installed for this script to work
+  # sudo apt-get install imwheel
+  # Pretty much hard wired to only use a mouse with
+  # left, right and wheel in the middle.
+  # If you have a mouse with complications or special needs,
+  # use the command xev to find what your wheel does.
+  #
+
+  ### see if imwheel config exists, if not create it ###
+  if [ ! -f ~/.imwheelrc ]; then
+  cat >~/.imwheelrc <<EOF
+".*"
+None,      Up,   Button4, 1
+None,      Down, Button5, 1
+Control_L, Up,   Control_L|Button4
+Control_L, Down, Control_L|Button5
+Shift_L,   Up,   Shift_L|Button4
+Shift_L,   Down, Shift_L|Button5
+EOF
+  fi
+
+  ### Start
+
+  CURRENT_VALUE="$(awk -F 'Button4,' '{print $2}' ~/.imwheelrc)"
+
+  NEW_VALUE=$(zenity --scale --window-icon=info --ok-label=Apply --title="Wheelies" --text "Mouse wheel speed:" --min-value=1 --max-value=100 --value="$CURRENT_VALUE" --step 1)
+
+  if [ "$NEW_VALUE" == "" ]; then
+    exit 0
+  fi
+
+  sed -i "s/\($TARGET_KEY *Button4, *\).*/\1$NEW_VALUE/" ~/.imwheelrc # find the string Button4, and write new value.
+  sed -i "s/\($TARGET_KEY *Button5, *\).*/\1$NEW_VALUE/" ~/.imwheelrc # find the string Button5, and write new value.
+
+  cat ~/.imwheelrc
+  imwheel -kill
+}
+
+trap cleanup INT TERM EXIT # Don't include ERR as this will trap on any err, but good for debug
+
+res=($lock*(N))
+
+[[ -z $res ]] || cleanup # toggle if active, careful that equivalent is  [[ -n ${res%$'\n'} ]] btw hotkey doesn't work somehow probably a missing binary?
+
+touch $lock
+
+while getopts "uds:" opt; do
+  case ${opt} in
+    u)
+      key=4
+      ;;
+    d)
+      key=5
+      ;;
+    s)
+      s=$OPTARG
+      ;;
+    g)
+      mode=gui
+      ;;
+    *)
+      echo "Usage: $0 -up -down -seconds"
+      exit 1
+      ;;
+  esac
+done
+
+shift $((OPTIND -1))
+
+if [[ $mode == gui ]]; then
+  gui
+  exit
+fi
+
+
+scroll() {
+
+  (
+    while [[ -e $lock.$key ]]; do
+      xdotool click --clearmodifiers $key
+      sleep $s
+    done
+  )&
+  pid=$!
+}
+
+# setsid zsh -c '( xinput test "14" | { grep  -m1  "button press   1" && cleanup } )'&
+
+
+xinput test 9 | while read -r line; do
+  echo $line >&2
+  case "$line" in
+    "key press   50"|"key press   62")  # 50 = Shift_L, 62 = Shift_R
+      touch $lock.$key
+      scroll
+      ;;
+    *"key press   36")  # enter
+      echo exit
+      cleanup
+      ;;
+    "key release 50"|*release*62*)
+      rm $lock.$key
+      wait $pid
+      # setxkbmap -option '' not sure if this does anything
+      xdotool keyup Shift_L Shift_R Control_L Control_R Alt_L Alt_R Super_L Super_R
+      ;;
+  esac
+done
+
+
