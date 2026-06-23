@@ -1,0 +1,19 @@
+SHELL=/bin/zsh
+PRECRON=/Users/rz/.zsh/subshell/cron.sh
+
+0,20 23 * * *	source $PRECRON; notify -s $TONESdir/Ringtones/Harp.m4r "Prepare to sleep" 
+40 23 * * *		source $PRECRON; notify -s $TONESdir/Ringtones/Harp.m4r "Powering off in 20 minutes"
+
+10,20,40,50 1-4 * * *	source $PRECRON; notify -s $TONESdir/Ringtones/Harp.m4r "SLEEP"
+
+0 11 * * * 		source $PRECRON; $SSdir/check_idle.sh || notify -s $TONESdir/Ringtones/Harp.m4r "Meditate"; $SSdir/shutdown.zsh
+0 10 * * * 		source $PRECRON; $SSdir/check_idle.sh || notify -s $TONESdir/Ringtones/Harp.m4r "Journal"
+0 12 * * *	 	source $PRECRON; $SSdir/check_idle.sh || notify -s $TONESdir/Ringtones/Harp.m4r "Journal"
+0 14 * * * 		source $PRECRON; $SSdir/check_idle.sh || notify -s $TONESdir/Ringtones/Harp.m4r "Journal"
+0 17 * * * 		source $PRECRON; $SSdir/check_idle.sh || notify -s $TONESdir/Ringtones/Harp.m4r "Journal"
+5 17 * * * 		source $PRECRON; $SSdir/check_idle.sh || notify -s $TONESdir/Ringtones/Harp.m4r "Walk/Dinner"; $SSdir/shutdown.zsh
+0 20 * * * 		source $PRECRON; $SSdir/check_idle.sh || notify -s $TONESdir/Ringtones/Harp.m4r "Journal"
+0 22 * * * 		source $PRECRON; $SSdir/check_idle.sh || notify -s $TONESdir/Ringtones/Harp.m4r "Journal"
+
+12/15 * * * *		source $PRECRON; $SSdir/git_obsidian.zsh
+* 17 * * *      source $PRECRON; $SSdir/syncthing/starchive.zsh

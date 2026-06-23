@@ -1,0 +1,18 @@
+[project]
+name = "book"
+version = "0.1.0"
+description = "Add a short description here"
+authors = ["squirreljetpacks <squirreljetpacks@gmail.com>"]
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+[tasks]
+
+[dependencies]
+python-frontmatter = ">=1.1.0,<1.2"
+requests = ">=2.32.3,<2.33"
+beautifulsoup4 = ">=4.12,<5"
+docling = ">=2.96.1,<2.97"
+
+[pypi-dependencies]
+docling = ">=2,<3"

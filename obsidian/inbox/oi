@@ -1,0 +1,7 @@
+oi expect_mode ...args
+
+pass args to mode
+
+
+mode will continue to read whatever args it needs with prompt
+done

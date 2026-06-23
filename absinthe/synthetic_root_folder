@@ -1,0 +1,9 @@
+#!/bin/zsh
+sudo touch /etc/synthetic.conf
+sudo chmod 0666 /etc/synthetic.conf
+FOLDER_NAME=$1
+ACTUAL_PATH_TO_REAL_FOLDER=$2
+echo -e "${FOLDER_NAME}\t${ACTUAL_PATH_TO_REAL_FOLDER}" | sudo tee -a /etc/synthetic.conf
+sudo chmod 0644 /etc/synthetic.conf
+sudo chown root:wheel /etc/synthetic.conf
+/System/Library/Filesystems/apfs.fs/Contents/Resources/apfs.util -t

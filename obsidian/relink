@@ -1,0 +1,18 @@
+#!/bin/zsh
+
+source $HOME/.zsh/subshell/cron.sh
+cd $OBSIDIAN_HOME
+relink() {
+	dest="../Obsidian_SHARED/$1"
+	# rsync -a "$1/" $dest
+	[[ -e "$dest" ]] && rm -r "$dest"
+	cp -lR --force "$1" "$dest"
+}
+
+relink BASE
+relink Books
+relink Theory
+relink Reference
+
+cd ../Obsidian_SHARED/BASE/.obsidian
+ln -sfn "hotkeys.json##os.Darwin,e.json" hotkeys.json

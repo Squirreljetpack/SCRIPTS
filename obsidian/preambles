@@ -1,0 +1,7 @@
+#!/bin/zsh
+cd $OBSIDIAN_HOME/Theory
+
+array=(*.md preamble.sty .Proofs_Appendix/*.md Problems/*.md Short/*.md)
+array[$array[(i)Extras.md]]=()
+tp.blocks Extras.md $array[@]
+

@@ -1,0 +1,20 @@
+(?d)(?i).DS_Store
+(?d)(?i).AppleDouble
+(?d)(?i).LSOverride
+(?d)(?i).DocumentRevisions-V100
+(?d)(?i).fseventsd
+(?d)(?i).Spotlight-V100
+(?d)(?i).TemporaryItems
+(?d)(?i).Trashes
+(?d)(?i).VolumeIcon.icns
+(?d)(?i).com.apple.timemachine.donotpresent
+(?d)(?i).AppleDB
+(?d)(?i).AppleDesktop
+(?d)(?i)Network Trash Folder
+(?d)(?i)Temporary Items
+(?d)(?i).apdisk
+(?d)(?i)._*
+
+(?d)(?i)OUTPUT
+(?d)(?i)target
+(?d)(?i).pixi
