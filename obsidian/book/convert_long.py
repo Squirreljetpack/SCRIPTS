@@ -129,7 +129,7 @@ CONFIG = {
         # "openai/o3-mini",
         # "openai/o1-mini",
         # "gemini-3.5-flash",
-        "anthropic/claude-3.7-sonnet",
+        "anthropic/claude-3.7-sonnet", # hopefully unreachable
     ],
     # Standard instruction models for direct transcription
     "transcriber_models": [
@@ -137,7 +137,7 @@ CONFIG = {
         "google/gemma-4-26b-a4b-it:free",
         "qwen/qwen3-next-80b-a3b-instruct:free",
         "gemini-3.5-flash",  # not flash-lite for safety
-        "gemini-3.1-flash-lite",  # self attention should make it ok at understanding html?
+        "gemini-3.1-flash-lite",  # self attention should mean its probably ok at understanding complicated html
         # good fallback for rate limiting: very slow but never errors out with 429
         "nvidia/nemotron-3-ultra-550b-a55b:free",
         # "meta-llama/llama-3.3-70b-instruct:free",
@@ -212,10 +212,6 @@ def call_openai(api_key, model, prompt, system_prompt, max_retries=2):
         "model": model,
         "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
     }
-
-    # Reasoning models (o1/o3) reject explicit temperature settings
-    # if not any(reasoning_id in model for reasoning_id in ["o1", "o3"]):
-    #     payload["temperature"] = 0.1
 
     response_data = call_llm_with_backoff(url, headers, payload, max_retries=max_retries)
     if "error" in response_data:

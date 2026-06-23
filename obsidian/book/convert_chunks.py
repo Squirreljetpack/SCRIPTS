@@ -7,18 +7,13 @@ Google Gemini API or OpenRouter free models, saving intermediate chunks to allow
 """
 
 import argparse
-import glob
 import json
-import os
 import re
 import sys
 import time
+from pathlib import Path
 
-import pypdf
 import requests
-from docling.datamodel.base_models import InputFormat
-from docling.datamodel.pipeline_options import PdfPipelineOptions
-from docling.document_converter import DocumentConverter, PdfFormatOption
 
 # ==========================================
 # CONFIGURATION & CONSTANTS
@@ -41,8 +36,10 @@ FREE_MODELS = [
     "google/gemma-4-26b-a4b-it:free",
     # "nousresearch/hermes-3-llama-3.1-405b:free", # likely not designed for transcription
     "gemini-2.5-flash",
-    "nvidia/nemotron-3-ultra-550b-a55b:free", # context is probably overkill here
+    "nvidia/nemotron-3-ultra-550b-a55b:free",  # context is probably overkill here
 ]
+
+CUSTOM_INSTRUCTIONS = ""
 
 DEFAULT_STANDARD_SYSTEM_PROMPT = """\
 You are a meticulous text transcriber. Your task is to clean up OCR and markdown extracted from a document.
@@ -213,6 +210,7 @@ def call_openrouter(api_key, model, prompt, system_prompt):
 def call_google_gemini(api_key, model, prompt, system_prompt):
     """Calls Google Gemini API directly with exponential backoff."""
     clean_model = model.split("/")[-1] if "/" in model else model
+    import os  # Keeping os restricted inside the API call block for clean environment keys access if needed
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
     payload = {
@@ -343,16 +341,19 @@ def process_chunk(
     Returns (success: bool, model_used: str, skipped: bool).  *model_used* is the model that
     ultimately produced the result (may differ from *model* if fallback occurred).
     """
+    file_path = Path(file_path)
+    output_dir = Path(output_dir)
+    filename_stem = file_path.stem
+
     if chunk_index is not None:
-        filename_stem = os.path.splitext(os.path.basename(file_path))[0]
         chunk_name = f"chunk_{chunk_index:04d}_{filename_stem}.md"
         docling_name = f"docling_{chunk_index:04d}_{filename_stem}.md"
     else:
         chunk_name = f"chunk_{start_page:04d}_{end_page:04d}.md"
         docling_name = f"docling_{start_page:04d}_{end_page:04d}.md"
 
-    output_path = os.path.join(output_dir, chunk_name)
-    docling_path = os.path.join(output_dir, docling_name)
+    output_path = output_dir / chunk_name
+    docling_path = output_dir / docling_name
 
     if start_page is not None and end_page is not None:
         chunk_info = (
@@ -363,18 +364,17 @@ def process_chunk(
     else:
         chunk_info = f"Chunk {chunk_index}" if chunk_index is not None else "whole file"
 
-    if os.path.exists(output_path) and not overwrite:
-        print(f"Output for {os.path.basename(file_path)} ({chunk_info}) already exists. Skipping.")
+    if output_path.exists() and not overwrite:
+        print(f"Output for {file_path.name} ({chunk_info}) already exists. Skipping.")
         return True, model, True
 
-    print(f"\n--- Processing file: {os.path.basename(file_path)} ({chunk_info}) ---")
+    print(f"\n--- Processing file: {file_path.name} ({chunk_info}) ---")
 
     try:
         # 1. Run Docling (or use existing)
-        if os.path.exists(docling_path) and not regen:
+        if docling_path.exists() and not regen:
             print(f"Using existing docling output: {docling_path}")
-            with open(docling_path, encoding="utf-8") as f:
-                raw_md = f.read()
+            raw_md = docling_path.read_text(encoding="utf-8")
         else:
             if start_page is not None and end_page is not None:
                 result = converter.convert(file_path, page_range=(start_page, end_page))
@@ -391,8 +391,7 @@ def process_chunk(
                         raw_md += f"- [Context: {page_ctx}] {fn_text}\n"
 
             if save_docling:
-                with open(docling_path, "w", encoding="utf-8") as f:
-                    f.write(raw_md)
+                docling_path.write_text(raw_md, encoding="utf-8")
                 print(f"Saved docling output: {docling_path}")
 
         # 2. Build system prompt
@@ -415,13 +414,12 @@ def process_chunk(
         #     cleaned_md = re.sub(r"\[\^(\d+)\]", rf"[^p{chunk_index}_\1]", cleaned_md)
 
         # 4. Save chunk
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(cleaned_md)
+        output_path.write_text(cleaned_md, encoding="utf-8")
         print(f"Saved: {output_path}")
         return True, model_used, False
     except Exception as e:
         if chunk_index is not None:
-            print(f"Error processing file {os.path.basename(file_path)}: {e}")
+            print(f"Error processing file {file_path.name}: {e}")
         else:
             print(f"Error processing pages {start_page}-{end_page}: {e}")
         return False, model, False
@@ -433,23 +431,45 @@ def process_chunk(
 
 
 def load_system_prompt(args):
-    """Loads a system prompt from in order: 1. args.system_prompt, 2. a filepath derived from the mode, 3. DEFAULT_STANDARD_SYSTEM_PROMPT."""
-    if args.system_prompt:
-        if os.path.exists(args.system_prompt):
-            with open(args.system_prompt, encoding="utf-8") as f:
-                return f.read().strip()
-            print(f"Error: system prompt file not found: {args.system_prompt}")
+    """
+    Loads the base system prompt based on args.prompt, then appends
+    CUSTOM_INSTRUCTIONS if it is non-empty.
+    """
+    base_prompt = None
+    args_prompt = Path(args.prompt) if args.prompt else None
+
+    # 1. Evaluate args.prompt if provided
+    if args_prompt:
+        if args_prompt.is_dir():
+            # If it's a directory, look for the mode-based file inside it
+            prompt_file = args_prompt / f"chunks_{args.mode}.txt"
+            if prompt_file.exists():
+                base_prompt = prompt_file.read_text(encoding="utf-8").strip()
+        elif args_prompt.is_file():
+            # If it's a specific file, load it directly
+            base_prompt = args_prompt.read_text(encoding="utf-8").strip()
+        else:
+            # It's an argument, but it doesn't exist as a file or directory
+            print(f"Error: prompt path not found: {args.prompt}")
             sys.exit(1)
 
-    # Try loading default prompt file based on mode
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    prompt_file = os.path.join(script_dir, f"chunks_convert_{args.mode}_prompt.txt")
+    # 2. Try loading default file from the script directory if no prompt was provided/found
+    if not base_prompt:
+        script_dir = Path(__file__).resolve().parent
+        prompt_file = script_dir / f"chunks_{args.mode}.txt"
 
-    if prompt_file and os.path.exists(prompt_file):
-        with open(prompt_file, encoding="utf-8") as f:
-            return f.read().strip()
+        if prompt_file.exists():
+            base_prompt = prompt_file.read_text(encoding="utf-8").strip()
 
-    return DEFAULT_STANDARD_SYSTEM_PROMPT
+    # 3. Fallback to standard default if nothing else worked
+    if not base_prompt:
+        base_prompt = DEFAULT_STANDARD_SYSTEM_PROMPT
+
+    # 4. Append CUSTOM_INSTRUCTIONS if it exists and is non-empty
+    if "CUSTOM_INSTRUCTIONS" in globals() and CUSTOM_INSTRUCTIONS and CUSTOM_INSTRUCTIONS.strip():
+        base_prompt = f"{base_prompt}\n\n{CUSTOM_INSTRUCTIONS.strip()}"
+
+    return base_prompt
 
 
 def find_chunks_for_file(output_dir, stem):
@@ -459,18 +479,23 @@ def find_chunks_for_file(output_dir, stem):
     and returns a list of sorted (index, filepath) tuples.
     """
     chunks = []
+    output_dir = Path(output_dir)
     pattern1 = re.compile(rf"^chunk_(\d+)_{re.escape(stem)}\.md$")
     pattern2 = re.compile(rf"^chunk_(\d+)_(\d+)(?:_{re.escape(stem)})?\.md$")
-    for filename in os.listdir(output_dir):
-        match1 = pattern1.match(filename)
-        if match1:
-            idx = int(match1.group(1))
-            chunks.append((idx, os.path.join(output_dir, filename)))
-        else:
-            match2 = pattern2.match(filename)
-            if match2:
-                idx = int(match2.group(1))
-                chunks.append((idx, os.path.join(output_dir, filename)))
+    
+    for item in output_dir.iterdir():
+        if item.is_file():
+            filename = item.name
+            match1 = pattern1.match(filename)
+            if match1:
+                idx = int(match1.group(1))
+                chunks.append((idx, item))
+            else:
+                match2 = pattern2.match(filename)
+                if match2:
+                    idx = int(match2.group(1))
+                    chunks.append((idx, item))
+                    
     chunks.sort(key=lambda x: x[0])
     return chunks
 
@@ -484,12 +509,14 @@ def merge_sequence_chunks(input_files, output_dir, merge_option):
     If merge_option is a non-empty string:
         Merge all files together into a single destination file, with '# Filename' at the top of each file's joined content.
     """
+    output_dir = Path(output_dir)
     if merge_option == "":
         # Merge per-file
         for file_path in input_files:
-            file_dir = os.path.dirname(os.path.abspath(file_path))
-            stem = os.path.splitext(os.path.basename(file_path))[0]
-            dest_path = os.path.join(file_dir, f"{stem}.md")
+            file_path = Path(file_path)
+            file_dir = file_path.resolve().parent
+            stem = file_path.stem
+            dest_path = file_dir / f"{stem}.md"
 
             chunks = find_chunks_for_file(output_dir, stem)
             if not chunks:
@@ -500,25 +527,26 @@ def merge_sequence_chunks(input_files, output_dir, merge_option):
 
             with open(dest_path, "w", encoding="utf-8") as out:
                 for idx, chunk_file in chunks:
-                    print(f"[merge]   {os.path.basename(chunk_file)}")
-                    with open(chunk_file, encoding="utf-8") as f:
-                        out.write(f.read())
+                    print(f"[merge]   {chunk_file.name}")
+                    out.write(chunk_file.read_text(encoding="utf-8"))
                     out.write("\n\n")
 
     elif merge_option:
         # Merge everything into a single file
-        if os.path.isabs(merge_option):
-            dest_path = merge_option
+        merge_path = Path(merge_option)
+        if merge_path.is_absolute():
+            dest_path = merge_path
         else:
-            first_file_dir = os.path.dirname(os.path.abspath(input_files[0]))
-            dest_path = os.path.join(first_file_dir, merge_option)
+            first_file_dir = Path(input_files[0]).resolve().parent
+            dest_path = first_file_dir / merge_option
 
         print(f"[merge] Merging all files into a single output → {dest_path}")
 
         with open(dest_path, "w", encoding="utf-8") as out:
             for file_path in input_files:
-                basename = os.path.basename(file_path)
-                stem = os.path.splitext(basename)[0]
+                file_path = Path(file_path)
+                basename = file_path.name
+                stem = file_path.stem
 
                 chunks = find_chunks_for_file(output_dir, stem)
                 if not chunks:
@@ -528,30 +556,28 @@ def merge_sequence_chunks(input_files, output_dir, merge_option):
                 out.write(f"\n# {basename}\n\n")
 
                 for idx, chunk_file in chunks:
-                    print(f"[merge] Adding chunk: {os.path.basename(chunk_file)}")
-                    with open(chunk_file, encoding="utf-8") as f:
-                        out.write(f.read())
+                    print(f"[merge] Adding chunk: {chunk_file.name}")
+                    out.write(chunk_file.read_text(encoding="utf-8"))
                     out.write("\n\n")
 
         print(f"[merge] Done. Saved to: {dest_path}")
 
 
-def natural_sort_key(s):
+def natural_sort_key(p):
+    # Standardizing natural sort to accept either Path objects or strings gracefully
+    s = p.name if isinstance(p, Path) else str(p)
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r"(\d+)", s)]
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Batch convert PDF to Clean Markdown with LLM APIs.")
+    parser = argparse.ArgumentParser(
+        description="Batch convert PDF to Clean Markdown with LLM APIs.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
     parser.add_argument("paths", nargs="+", help="Paths to files or directories")
     parser.add_argument("--start", type=int, default=1, help="Start page/pdf")
     parser.add_argument("--end", type=int, default=None, help="End page")
     parser.add_argument("--output-dir", default="output_chunks", help="Directory to save chunks")
-    parser.add_argument(
-        "--delay",
-        type=float,
-        default=DELAY_BETWEEN_CHUNKS,
-        help="Seconds to wait between chunks (default: %(default)s)",
-    )
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing chunks")
     parser.add_argument(
         "--no-merge", action="store_true", help="Skip merging chunks into a single .md file on completion"
@@ -564,50 +590,69 @@ def main():
         default="",
         help="Override the auto-generated merge filename or set to empty string to merge chunks of single files back together.",
     )
+
     parser.add_argument(
         "--mode",
         default="standard",
-        help="Processing mode (default: standard [podcast/poetry]). Will cause the program to attempt to look for a system prompt from chunks_convert_{mode}_prompt.txt in the same directory as the script.",
+        help="Processing mode. Will cause the program to attempt to look for a system prompt from chunks_{mode}.txt the prompts directory",
     )
     parser.add_argument(
-        "--system-prompt",
-        default=None,
-        help="Path to a system prompt text file. If not provided, a default system prompt is used based on --mode.",
+        "--prompt",
+        type=str,
+        default=str(Path(__file__).resolve().parent / "prompts"),
+        help="Path to the prompt file, or directory containing prompt files in the form chunk_{mode}.txt.",
     )
+
     parser.add_argument(
-        "--docling",
+        "--extract",
         nargs="?",
         const="store",
         default=None,
-        help="If specified, saves raw docling extraction outputs alongside chunks (default mode: store). Can be set to 'preview' to print the first file's extraction to stdout and exit, 'direct' to skip the remote LLM cleaning pass and write raw docling output to chunk files directly, or 'regen' to force regeneration of docling files.",
+        choices=["store", "regen", "direct", "preview"],
+        help=(
+            "If specified, saves raw extraction outputs alongside chunks. "
+            "Options include: "
+            "- None; "
+            "- store: save raw outputs; "
+            "- preview: print first extraction to stdout and exits; "
+            "- direct: skip remote LLM cleaning pass; "
+            "- regen: forces regeneration of docling artifacts."
+        ),
     )
+
     parser.add_argument(
-        "--regen",
-        action="store_true",
-        help="Force regeneration of docling files (overwrites existing ones and has the effect of --docling=store).",
+        "--docling",
+        default="standard",
+        choices=["standard", "ocr", "vlm"],
+        help="Configure the extraction pipeline architecture engine.",
     )
+
     parser.add_argument(
-        "--ocr",
-        action="store_true",
-        help="Enable OCR during extraction (default: False)",
-    )
-    parser.add_argument(
-        "--vlm",
-        action="store_true",
-        help="Use VLM-based document pipeline (default is layout/OCR pipeline).",
+        "--delay",
+        type=float,
+        default=DELAY_BETWEEN_CHUNKS,
+        help="Seconds to wait between chunks",
     )
 
     args = parser.parse_args()
-    os.makedirs(args.output_dir, exist_ok=True)
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Contextual heavy-imports deferred inside main to completely remove generic execution delays
+    import os  # Deferred import required exclusively for environment resolution safely inside core block
+    import pypdf
+    from docling.datamodel.base_models import InputFormat
+    from docling.datamodel.pipeline_options import PdfPipelineOptions
+    from docling.document_converter import DocumentConverter, PdfFormatOption
 
     # Load system prompt content
     system_prompt_content = load_system_prompt(args)
 
     model = None
     model_pool = []
-    skip_llm = args.docling == "direct"
-    save_docling = (args.docling in ("store", "regen")) or args.regen
-    regen_active = args.regen or (args.docling == "regen")
+    skip_llm = args.extract == "direct"
+    save_docling = args.extract in ("store", "regen")
+    regen_active = args.extract == "regen"
 
     # Resolve API keys from environment
     gemini_key = os.environ.get("GEMINI_API_KEY", "")
@@ -629,7 +674,7 @@ def main():
         model_pool = [model] + [m for m in FREE_MODELS if m != model]
 
     # Set up Docling
-    if args.vlm:
+    if args.docling == "vlm":
         from docling.datamodel.pipeline_options import VlmPipelineOptions
         from docling.pipeline.vlm_pipeline import VlmPipeline
 
@@ -643,8 +688,8 @@ def main():
             print("Warning: HF_TOKEN environment variable is not set. Downloads might be slow or rate-limited.")
     else:
         pipeline_options = PdfPipelineOptions()
-        pipeline_options.do_ocr = args.ocr
-        if args.ocr:
+        pipeline_options.do_ocr = args.docling == "ocr"
+        if args.docling == "ocr":
             try:
                 from docling.datamodel.pipeline_options import OcrMacOptions
 
@@ -659,24 +704,27 @@ def main():
 
     converter = DocumentConverter(format_options={InputFormat.PDF: pdf_format_option})
 
-    # Expand paths to input files
+    # Expand paths to input files using Pathlib
     input_files = []
-    for path in args.paths:
-        if os.path.isdir(path):
-            dir_files = [os.path.join(path, f) for f in os.listdir(path) if os.path.isfile(os.path.join(path, f))]
-            dir_files = [f for f in dir_files if not os.path.basename(f).startswith(".")]
+    for path_str in args.paths:
+        path_obj = Path(path_str)
+        if path_obj.is_dir():
+            dir_files = [f for f in path_obj.iterdir() if f.is_file() and not f.name.startswith(".")]
             dir_files.sort(key=natural_sort_key)
             input_files.extend(dir_files)
         else:
-            globbed = glob.glob(path)
+            # Handles string wildcards safely via pure pathlib matching
+            parent_dir = path_obj.parent if path_obj.parent != Path() else Path(".")
+            glob_pattern = path_obj.name
+            globbed = [f for f in parent_dir.glob(glob_pattern) if f.is_file()]
             if globbed:
                 globbed.sort(key=natural_sort_key)
                 input_files.extend(globbed)
             else:
-                input_files.append(path)
+                input_files.append(path_obj)
 
     # Keep only existing files
-    input_files = [f for f in input_files if os.path.isfile(f)]
+    input_files = [f for f in input_files if f.is_file()]
 
     # Make sure the final input files list is sorted naturally
     input_files.sort(key=natural_sort_key)
@@ -712,20 +760,19 @@ def main():
         start_page = max(1, args.start)
         global_chunk_idx = ((start_page - 1) // CHUNK_SIZE) + 1
 
-    if args.docling == "preview":
+    if args.extract == "preview":
         target_file = input_files[0]
 
-        print(f"--- Docling Preview for {target_file} ---")
+        print(f"--- Docling Preview for {target_file.name} ---")
 
         try:
-            filename_stem = os.path.splitext(os.path.basename(target_file))[0]
+            filename_stem = target_file.stem
             docling_name = f"docling_{global_chunk_idx:04d}_{filename_stem}.md"
-            dest_path = os.path.join(args.output_dir, docling_name)
+            dest_path = output_dir / docling_name
 
-            if os.path.exists(dest_path) and not regen_active:
+            if dest_path.exists() and not regen_active:
                 print(f"Using existing docling output: {dest_path}")
-                with open(dest_path, encoding="utf-8") as f:
-                    raw_md = f.read()
+                raw_md = dest_path.read_text(encoding="utf-8")
             else:
                 if not is_sequence_mode:
                     # --- Single File Mode ---
@@ -750,8 +797,7 @@ def main():
                     result = converter.convert(target_file, page_range=(1, preview_end_page))
 
                 raw_md = result.document.export_to_markdown()
-                with open(dest_path, "w", encoding="utf-8") as f:
-                    f.write(raw_md)
+                dest_path.write_text(raw_md, encoding="utf-8")
                 print(f"\n[Preview] Saved docling output to: {dest_path}")
 
             print(raw_md)
@@ -764,7 +810,7 @@ def main():
         print(f"Using Provider: {provider_label}, Model: {model}")
         print(f"Model fallback pool: {model_pool}")
     else:
-        print("Skipping LLM cleaning pass due to --docling=direct.")
+        print("Skipping LLM cleaning pass due to --extract=direct.")
 
     success_count = 0
     fail_count = 0
@@ -779,7 +825,7 @@ def main():
             reader = pypdf.PdfReader(file_path)
             total_pages = len(reader.pages)
         except Exception as e:
-            print(f"Error reading {file_path} as pdf, attempting whole file: {e}")
+            print(f"Error reading {file_path.name} as pdf, attempting whole file: {e}")
             is_pdf = False
             total_pages = 1
 
@@ -796,12 +842,12 @@ def main():
 
         if start_page > end_page:
             print(
-                f"Skipping {os.path.basename(file_path)}: start page ({start_page}) is greater than end page ({end_page})."
+                f"Skipping {file_path.name}: start page ({start_page}) is greater than end page ({end_page})."
             )
             continue
 
         print(
-            f"Processing {os.path.basename(file_path)} (pages {start_page} to {end_page}, total pages in file: {total_pages})..."
+            f"Processing {file_path.name} (pages {start_page} to {end_page}, total pages in file: {total_pages})..."
         )
 
         current = start_page
@@ -851,7 +897,7 @@ def main():
                 # Rotate through the pool from the top and retry after a delay.
                 active_model = model_pool[0] if model_pool else None
                 print(
-                    f"  [ALL FAIL] Every model failed for {os.path.basename(file_path)} ({print_msg}). "
+                    f"  [ALL FAIL] Every model failed for {file_path.name} ({print_msg}). "
                     f"Retrying entire model cycle in {ALL_FAIL_RETRY_DELAY}s..."
                 )
                 time.sleep(ALL_FAIL_RETRY_DELAY)

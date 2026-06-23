@@ -13,6 +13,5 @@ python-frontmatter = ">=1.1.0,<1.2"
 requests = ">=2.32.3,<2.33"
 beautifulsoup4 = ">=4.12,<5"
 docling = ">=2.96.1,<2.97"
+pypdf = ">=6.14.0,<6.15"
 
-[pypi-dependencies]
-docling = ">=2,<3"

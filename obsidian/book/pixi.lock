@@ -213,6 +213,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/pydantic-settings-2.14.2-pyhcf101f3_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pygments-2.20.0-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pylatexenc-2.10-pyhd8ed1ab_1.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/pypdf-6.14.0-pyhcf101f3_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pypdfium2-5.10.1-py313h12dd151_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pysocks-1.7.1-pyha2e5f31_6.tar.bz2
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/python-3.13.14-h448ec07_100_cp313.conda
@@ -4306,6 +4307,22 @@ packages:
   - pkg:pypi/pylatexenc?source=conda-forge-mapping
   size: 103261
   timestamp: 1734379426692
+- kind: conda
+  name: pypdf
+  version: 6.14.0
+  build: pyhcf101f3_0
+  subdir: noarch
+  noarch: python
+  url: https://conda.anaconda.org/conda-forge/noarch/pypdf-6.14.0-pyhcf101f3_0.conda
+  sha256: 9fe4b1ffb1cad25b000d1d19a090930e73fa136f941bfb308e3694712014026c
+  md5: 504012d87d4cb9f952ba83c7541ba69d
+  depends:
+  - python >=3.10
+  - typing_extensions >=4.0
+  - python
+  license: BSD-3-Clause
+  size: 285761
+  timestamp: 1782165947729
 - kind: conda
   name: pypdfium2
   version: 5.10.1
