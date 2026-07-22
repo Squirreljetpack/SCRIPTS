@@ -29,6 +29,8 @@ INITIAL_BACKOFF = 5
 MAX_BACKOFF = 360
 REQUEST_TIMEOUT = 300  # HTTP request timeout in seconds
 
+MERGE_DELIMITER = "\n\n"
+
 # Default list of free models to try
 FREE_MODELS = [
     "gemini-3.1-flash-lite",  # good enough
@@ -211,6 +213,7 @@ def call_google_gemini(api_key, model, prompt, system_prompt):
     """Calls Google Gemini API directly with exponential backoff."""
     clean_model = model.split("/")[-1] if "/" in model else model
     import os  # Keeping os restricted inside the API call block for clean environment keys access if needed
+
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
     payload = {
@@ -409,10 +412,6 @@ def process_chunk(
         if model_used != model:
             print(f"  [INFO] Fell back to model: {model_used}")
 
-        # if mode == "___":
-        # Post-process to prevent footnote collisions across chunks
-        #     cleaned_md = re.sub(r"\[\^(\d+)\]", rf"[^p{chunk_index}_\1]", cleaned_md)
-
         # 4. Save chunk
         output_path.write_text(cleaned_md, encoding="utf-8")
         print(f"Saved: {output_path}")
@@ -482,7 +481,7 @@ def find_chunks_for_file(output_dir, stem):
     output_dir = Path(output_dir)
     pattern1 = re.compile(rf"^chunk_(\d+)_{re.escape(stem)}\.md$")
     pattern2 = re.compile(rf"^chunk_(\d+)_(\d+)(?:_{re.escape(stem)})?\.md$")
-    
+
     for item in output_dir.iterdir():
         if item.is_file():
             filename = item.name
@@ -495,7 +494,7 @@ def find_chunks_for_file(output_dir, stem):
                 if match2:
                     idx = int(match2.group(1))
                     chunks.append((idx, item))
-                    
+
     chunks.sort(key=lambda x: x[0])
     return chunks
 
@@ -529,7 +528,7 @@ def merge_sequence_chunks(input_files, output_dir, merge_option):
                 for idx, chunk_file in chunks:
                     print(f"[merge]   {chunk_file.name}")
                     out.write(chunk_file.read_text(encoding="utf-8"))
-                    out.write("\n\n")
+                    out.write(MERGE_DELIMITER)
 
     elif merge_option:
         # Merge everything into a single file
@@ -558,7 +557,7 @@ def merge_sequence_chunks(input_files, output_dir, merge_option):
                 for idx, chunk_file in chunks:
                     print(f"[merge] Adding chunk: {chunk_file.name}")
                     out.write(chunk_file.read_text(encoding="utf-8"))
-                    out.write("\n\n")
+                    out.write(MERGE_DELIMITER)
 
         print(f"[merge] Done. Saved to: {dest_path}")
 
@@ -640,6 +639,7 @@ def main():
 
     # Contextual heavy-imports deferred inside main to completely remove generic execution delays
     import os  # Deferred import required exclusively for environment resolution safely inside core block
+
     import pypdf
     from docling.datamodel.base_models import InputFormat
     from docling.datamodel.pipeline_options import PdfPipelineOptions
@@ -714,7 +714,7 @@ def main():
             input_files.extend(dir_files)
         else:
             # Handles string wildcards safely via pure pathlib matching
-            parent_dir = path_obj.parent if path_obj.parent != Path() else Path(".")
+            parent_dir = path_obj.parent if path_obj.parent != Path() else Path()
             glob_pattern = path_obj.name
             globbed = [f for f in parent_dir.glob(glob_pattern) if f.is_file()]
             if globbed:
@@ -841,14 +841,10 @@ def main():
             end_page = total_pages
 
         if start_page > end_page:
-            print(
-                f"Skipping {file_path.name}: start page ({start_page}) is greater than end page ({end_page})."
-            )
+            print(f"Skipping {file_path.name}: start page ({start_page}) is greater than end page ({end_page}).")
             continue
 
-        print(
-            f"Processing {file_path.name} (pages {start_page} to {end_page}, total pages in file: {total_pages})..."
-        )
+        print(f"Processing {file_path.name} (pages {start_page} to {end_page}, total pages in file: {total_pages})...")
 
         current = start_page
         while current <= end_page:

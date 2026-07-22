@@ -54,10 +54,10 @@ sed -i '' 's|(./images|(./.'${name}'.assets|g' "${name}.md"
 mv $name/$name/images ".${name}.assets" || :
 
 # check book
-_ob-open $name.md || true
+ob-open $name.md || :
 printf "Awaiting confirmation for convertbook"
 read
 
 # cleanup
-${0:a:h}/.pixi/envs/default/bin/python ${0:a:h}/convertbook.py $name.md
+${0:a:h}/.pixi/envs/default/bin/python ${0:a:h}/convert_book.py $name.md
 rm -rf "$name"

@@ -95,7 +95,6 @@ $TEMPLATING_SCRIPT > /dev/null
 
 echo "\n----- PLUGINS -----\n"
 
-code_plugins=(obsidian-dirtreeist unitade shiki-highlighter)
 PLUGIN_SUBPATH=".obsidian/plugins"
 
 symlink_plugins() {
@@ -105,6 +104,9 @@ symlink_plugins() {
   # Resolve the absolute path of the target directory
   abs_theirs="$(cd "$theirs" 2>/dev/null && pwd)"
   [ -n "$abs_theirs" ] || return
+
+  # Extract the basename of $1
+  local target_base="${1##*/}"
 
   # 1. Create the shadow directory and duplicate existing state
   mkdir -p "$theirs_tmp"
@@ -119,9 +121,25 @@ symlink_plugins() {
     fi
   done
 
-  # 3. Link BASE plugins to shadow directory for a more atomic operation
+  # 3. Link or Copy BASE plugins to shadow directory
   for p in *; do
+    [ -e "$p" ] || continue
     target="$theirs_tmp/$p"
+
+    # Check if the plugin is defined as a key in the COPY_PLUGINS array
+    if (( ${+COPY_PLUGINS[$p]} )); then
+      # If basename of $1 is in the colon-delimited list for $p
+      if [[ ":${COPY_PLUGINS[$p]}:" == *":${target_base}:"* ]]; then
+        # : prefix -> symlink, Copy only if it doesn't already exist
+        if [[ "${COPY_PLUGINS[$p]}" != ":"* ]] && [ ! -e "$target" ]; then
+            cp -a "$p" "$target"
+            continue
+        fi
+      else
+        continue
+      fi
+    fi
+
     # Don't overwrite concrete plugins
     [ -e "$target" ] && [ ! -L "$target" ] && continue
 
@@ -169,16 +187,13 @@ symlink_plugins() {
   sync
 }
 
-copy_code_plugins() {
-  for p in *; do
-    (( ${code_plugins[(Ie)$1]} )) || continue
-    cd ../code_plugins && {
-      [[ -e "$1/$PLUGIN_SUBPATH/$p" ]] || cp -r $p "$1/$PLUGIN_SUBPATH/$p"
-      cd ../plugins
-    } || echo "code_plugins not found"
-  done
-  
-}
+typeset -A COPY_PLUGINS=(
+  [shiki-highlighter]="Reference:Programming"
+  [obsidian42-brat]=""
+  [tabs]=":Reference:Programming:Personal"
+  [obsidian-latex]=":Reference:Programming:Personal"
+  # [dataview]="Personal"
+)
 
 cd $OBSIDIAN_HOME/BASE/$PLUGIN_SUBPATH || exit 1
 
@@ -187,7 +202,17 @@ while read -r submodule; do
   symlink_plugins $OBSIDIAN_HOME/$submodule
 done < <(submodule_names)
 
-copy_code_plugins $OBSIDIAN_HOME/Reference
+if [[ "$CHECK" == "skip" ]]; then
+  info "Execution complete"
+  
+  # 1. Restore stdout and stderr to close the pipes to the `tee` subshells
+  exec 1>&3 2>&4
+  
+  # See https://www.zsh.org/mla/users/1999/msg00619.html
+  coproc exit
+  kill -KILL "$coproc_pid" 2>/dev/null || :
+  exit
+fi
 
 ### SYNCING
 resolve_submodule_conflicts() {
